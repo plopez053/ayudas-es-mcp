@@ -1,0 +1,54 @@
+He aplicado las mejoras y he subido la versión a 0.6.0. Pasan todas las pruebas: las de sin red, la verificación contra la BDNS real y la prueba completa por MCP. El paquete pesa 54 kB y no he publicado nada.
+
+Fallos corregidos
+Una conexión colgada podía bloquear el servidor indefinidamente, porque ninguna petición tenía tiempo máximo. Ahora cada una tiene 30 s (2 min para los PDF) y reintentos ante cortes de red, también en el BOE y en el calendario de festivos.
+Una sola convocatoria problemática tumbaba la búsqueda entera. Si la BDNS había retirado una de las ayudas listadas, ayudas_buscar devolvía un error. Ahora esa fila sale sin detalle y el resto se muestra igual.
+ayuda_texto fallaba si el documento elegido no era un PDF (un Word, por ejemplo) o pesaba demasiado. Ahora prueba con el siguiente documento e indica cuál no pudo leer.
+"Hoy" se calculaba en hora UTC. Entre las 00:00 y las 02:00, un plazo que vencía ayer salía como abierto. Ahora todas las fechas van en hora peninsular española.
+Formato: algunos títulos de la BDNS traen saltos de línea que rompían el texto de la respuesta, y en el calendario salía una línea en blanco suelta.
+Mejoras de utilidad
+El relleno de detalles va más rápido. Antes, casi la mitad de las consultas de detalle eran de convocatorias que el título ya delataba como concesión directa, y el 98 % lo confirmaba. Ahora se piden primero las que sí se pueden solicitar, y se piden 500 por ronda en lugar de 300.
+Ayudas antiguas aún abiertas: ayudas_buscar muestra aparte las registradas hace más de 90 días cuyo plazo se conoce y no ha vencido. Hoy ese bloque sale vacío, porque solo hay plazo de las convocatorias desde septiembre; se irá llenando a medida que se rellenen detalles.
+Mejoras en el servidor MCP:
+Envía instrucciones al modelo: qué herramienta usar para contar y cuál para leer requisitos, y que no complete con datos que no le han dado.
+Las herramientas van marcadas como de solo lectura, así que los clientes que lo admiten no piden confirmación en cada llamada.
+Hay dos prompts que aparecen como comandos / en Claude: ayudas_para_mi (le das tu perfil) y analizar_convocatoria (le das un código BDNS).
+Otros cambios:
+La versión se lee de un solo sitio (package.json).
+Nuevo comando --version.
+El comando sync comprueba que sus parámetros sean válidos.
+npm test ya no necesita internet; las pruebas contra las fuentes reales pasan a npm run test:live.
+He actualizado el README.md con todo lo anterior.
+Lo que queda
+La limitación más importante: solo el 1 % de las convocatorias tiene detalle descargado (plazo y presupuesto). Por eso los recuentos casi nunca pueden mostrar el presupuesto. Se llenará solo, de lo más reciente a lo más antiguo.
+Pendientes de tu decisión:
+Falta el archivo LICENSE. El package.json dice MIT, pero necesito el nombre que quieres que figure.
+La carpeta sigue llamándose boe-mcp.
+
+
+explicame que es lo de la limitacion ms importante
+4:08 PM
+La BDNS da la información de cada convocatoria en dos niveles, y solo uno de ellos se puede descargar de golpe.
+
+Los dos niveles de la BDNS
+Listado	Detalle
+Qué trae	Título, quién convoca, fecha de registro, comunidad, sector, tipo de beneficiario	Plazo de solicitud, presupuesto, tipo de convocatoria (si es concesión directa o no), extracto, documentos PDF
+Cómo se descarga	Por bloques de 10.000 en una sola petición	Una petición por convocatoria
+Lo que tenemos	Las 378.414 convocatorias (100 %)	1.908 (1 %, las registradas desde septiembre)
+La BDNS bloquea a quien hace muchas peticiones seguidas, así que los detalles se piden de uno en uno, a uno por segundo. Descargar todos llevaría unas 105 horas seguidas (4 días y medio), y el servidor solo pide 500 cada 6 horas mientras está abierto.
+
+Qué funciona bien igualmente
+Búsquedas: las ayudas que aparecen en la respuesta sí salen con plazo y presupuesto, porque si falta el detalle se pide en ese momento. Por eso una búsqueda tarda ~1 s en vez de milisegundos.
+Recuentos y rankings: son exactos, porque usan el listado.
+Calendario previsto: solo usa las fechas de registro, que están todas.
+Lectura de PDF: se hace bajo demanda.
+Qué se ve afectado
+Presupuestos en los recuentos. «¿Cuánto dinero ha convocado cada comunidad en vivienda?» no se puede responder: solo 2 de 117 convocatorias catalanas tienen presupuesto, y sumar eso daría una cifra falsa. Por eso sale «—».
+Ayudas antiguas aún abiertas. Una ayuda registrada en mayo con plazo hasta diciembre no aparece como abierta, porque no conocemos su plazo. La respuesta solo avisa de que puede haber algunas.
+Concesiones directas. Sin el detalle no sabemos con certeza si una convocatoria se puede solicitar. Se estima por el título, que acierta el 97 % de las veces pero solo detecta 2 de cada 3.
+Cómo se puede resolver
+Esperar. Con las mejoras de hoy se piden primero las que se pueden solicitar. Las de los últimos 6 meses son unas 18.500, así que se cubrirían en unos 9 días con el servidor abierto todo el día. Para un usuario normal, que lo abre de vez en cuando, tardaría mucho más.
+Lanzarlo a mano una noche: npx ayudas-es-mcp sync --detalles 20000 tarda unas 5-6 horas. Antes habría que arreglar una cosa: el bloqueo que impide que dos copias del servidor sincronicen a la vez caduca a los 45 minutos. En una ejecución tan larga, otra copia podría ponerse a sincronizar al mismo tiempo y duplicar las peticiones.
+Distribuir la base ya rellenada (la solución de fondo). Tú la mantienes completa una sola vez, por ejemplo con una tarea diaria en GitHub Actions, y la publicas. Cada usuario la descarga al instalar en vez de construirla desde cero. Así todos tendrían presupuestos y plazos desde el primer minuto, y la BDNS recibiría muchas menos peticiones. Habría que medir antes cuánto pesa comprimida.
+Alojarlo en un servidor remoto: una sola base completa para todos, pero tiene coste y hay que mantenerlo.
+Si te interesa, empiezo por arreglar el bloqueo y mido cuánto pesaría la base para distribuirla, y con eso decides
