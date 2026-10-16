@@ -1,5 +1,5 @@
 // Peticiones HTTP con tiempo máximo: sin él, una conexión que se queda colgada bloquea la
-// herramienta (y la sincronización) indefinidamente.
+// herramienta indefinidamente.
 
 const TIMEOUT_MS = Number(process.env.AYUDAS_TIMEOUT_MS ?? 30_000);
 

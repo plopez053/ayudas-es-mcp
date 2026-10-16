@@ -21,30 +21,31 @@ import {
   FINALIDADES,
   INSTRUMENTOS,
   urlFicha,
+  type FilaListado,
 } from "./bdns.js";
+import { estadisticas } from "./cache.js";
 import {
   AGRUPACIONES,
-  buscar,
-  estadoBase,
-  leerDetalle,
-  recuento,
-  totalConFiltros,
-  where,
+  buscarDirecto,
+  detalleDirecto,
+  detalleGuardado,
+  recuentoDirecto,
+  totalDirecto,
+  type DetalleCompleto,
   type Filtros,
-  type FilaBusqueda,
-} from "./db.js";
-import { obtenerDetalle, type DetalleCompleto } from "./detalle.js";
+} from "./directo.js";
 import { estadoDe, type Estado } from "./plazos.js";
 import {
-  evaluacionGuardada,
+  calendario,
+  calendarioEnCurso,
+  HISTORICO_DESDE,
+  prepararCalendario,
   prever,
   serieDe,
   seriesFiltradas,
-  seriesListas,
   type Prevision,
   type SerieFila,
 } from "./series.js";
-import { mantener } from "./sync.js";
 import { buscarPalabras, buscarTema, importesEnTexto, puntuarDocumento, TEMAS, type Tema } from "./documentos.js";
 import { textoDeAyuda } from "./texto-ayuda.js";
 import { haceDias, hoy, sumarDias } from "./fechas.js";
@@ -140,78 +141,29 @@ const hace = haceDias;
 
 const texto = (text: string) => ({ content: [{ type: "text" as const, text }] });
 
-// --- Base local -----------------------------------------------------------------------------
+// --- Datos en directo -----------------------------------------------------------------------
 
-/** Error explícito si la base aún no existe: nunca responder "no hay ayudas" con la base vacía. */
-function exigirBase() {
-  const e = estadoBase();
-  if (!e.ultima_sync) {
-    void mantener({ log }).catch((err) => log(`sync: ${err.message}`));
-    throw new Error(
-      "La base local de ayudas aún se está construyendo (primera ejecución, 1-3 minutos). " +
-        "Vuelve a intentarlo en un momento. No interpretes esto como que no hay ayudas.",
-    );
-  }
-  return e;
-}
-
-function notaCobertura(f: Filtros): string {
-  const e = estadoBase();
-  const horas = e.ultima_sync ? (Date.now() - new Date(e.ultima_sync).getTime()) / 3_600_000 : Infinity;
-  const avisos = [
-    `Datos de la BDNS sincronizados el ${e.ultima_sync?.slice(0, 10)} ` +
-      `(convocatorias registradas desde ${e.desde}).`,
-  ];
-  if (horas > 48) {
-    avisos.push(
-      `⚠️ La última sincronización fue hace ${Math.round(horas / 24)} días: puede faltar lo más reciente.`,
-    );
-  }
-  if (f.desde && e.desde && f.desde < e.desde) {
-    avisos.push(`⚠️ Has pedido desde ${f.desde}, pero la base local solo cubre desde ${e.desde}.`);
-  }
-  return avisos.join(" ");
-}
-
-/** Estados en los que un detalle guardado puede haber cambiado al publicarse el extracto. */
-const PLAZO_PROVISIONAL = ["pendiente_publicacion", "desconocido"];
-const UN_DIA = 86_400_000;
+/** El aviso legal de la BDNS exige citar el origen con esta fórmula (infosubvenciones.es/bdnstrans/GE/es/avisolegal). */
+const FUENTE =
+  "Origen de los datos: Intervención General de la Administración del Estado (BDNS, infosubvenciones.es), " +
+  "consultados en directo; las consultas repetidas salen de una caché temporal.";
 
 /**
- * Recorre las filas en orden, completando su detalle (fechas, presupuesto) si falta, hasta
- * reunir `limite` visibles. Así solo se pide a la BDNS el detalle de lo que se va a mostrar.
- * Los detalles con plazo provisional de más de un día se vuelven a pedir: es lo que más cambia.
+ * El calendario previsto necesita el histórico desde 2021 (unas 40 peticiones). Se prepara en
+ * segundo plano la primera vez que se usa una herramienta de ayudas, y no al arrancar: los
+ * clientes MCP abren los servidores aunque no se usen. El retraso deja pasar antes la primera
+ * pregunta, que comparte el ritmo de peticiones con la descarga.
  */
-async function seleccionarConDetalle(filas: FilaBusqueda[], limite: number, soloSolicitables: boolean) {
-  const detalles = new Map<string, DetalleCompleto>();
-  const visibles: FilaBusqueda[] = [];
-  let fallo = false;
-  for (const f of filas) {
-    if (visibles.length >= limite) break;
-    const guardado = leerDetalle(f.codigo);
-    let d = guardado?.detalle;
-    const caducado =
-      guardado &&
-      PLAZO_PROVISIONAL.includes(guardado.detalle.plazo_interpretado.tipo) &&
-      Date.now() - new Date(guardado.en).getTime() > UN_DIA;
-    if ((!d || caducado) && !fallo) {
-      try {
-        d = await obtenerDetalle(f.codigo);
-      } catch (e) {
-        // Bloqueo o corte: el resto se muestra con lo que haya, avisando. Otro error (p. ej. una
-        // convocatoria retirada de la BDNS) solo afecta a esa fila, no a toda la búsqueda.
-        if (e instanceof BdnsNoDisponible) fallo = true;
-        else log(`detalle ${f.codigo}: ${(e as Error).message}`);
-      }
-    }
-    if (d) {
-      detalles.set(f.codigo, d);
-      const estado = estadoDe(d.plazo_interpretado);
-      if (soloSolicitables && (estado === "cerrada" || estado === "sin_plazo")) continue;
-    }
-    visibles.push(f);
-  }
-  return { detalles, visibles, fallo };
+let calendarioPedido = false;
+function calentarCalendario() {
+  if (calendarioPedido) return;
+  calendarioPedido = true;
+  setTimeout(() => {
+    prepararCalendario(log).catch((e) => {
+      calendarioPedido = false;
+      log(`calendario: ${(e as Error).message}`);
+    });
+  }, 20_000).unref();
 }
 
 // --- Formato --------------------------------------------------------------------------------
@@ -276,7 +228,7 @@ function formatearAyuda(a: DetalleCompleto): string {
     .join("\n");
 }
 
-function formatearFila(f: FilaBusqueda, d: DetalleCompleto | undefined): string {
+function formatearFila(f: FilaListado, d: DetalleCompleto | undefined): string {
   if (d) return formatearAyuda(d);
   return [
     `### ${unaLinea(f.titulo)}`,
@@ -303,7 +255,7 @@ function formatearPrevision(p: Prevision): string {
       : p.situacion === "en_margen"
         ? `⏳ INMINENTE: solía registrarse hacia el ${diaMes(p.fecha_prevista)}; aún dentro de su margen habitual (hasta el ${diaMes(p.hasta)})`
         : `🔮 Prevista hacia el ${diaMes(p.fecha_prevista)} (probable entre el ${diaMes(p.desde)} y el ${diaMes(p.hasta)})`;
-  const d = leerDetalle(p.ultima_codigo)?.detalle;
+  const d = detalleGuardado(p.ultima_codigo);
   return [
     `### ${unaLinea(p.titulo)}`,
     `- Convoca: ${[p.administracion, p.departamento, p.organo].filter(Boolean).join(" › ")}`,
@@ -325,13 +277,6 @@ function filtrarBoe(pubs: Publicacion[], palabras?: string[], secciones?: Seccio
       (!secciones?.length || secciones.includes(p.seccion_codigo as Seccion)) &&
       (!palabras?.length || coincide(p, palabras)),
   );
-}
-
-/** Busca en la base local y completa el detalle de lo que se muestra. */
-async function buscarAyudas(f: Filtros, limite: number, soloAbiertas: boolean) {
-  // Se leen más filas de las que se muestran: algunas resultan cerradas al conocer su detalle.
-  const r = buscar(f, soloAbiertas ? limite * 3 : limite, soloAbiertas);
-  return { ...r, ...(await seleccionarConDetalle(r.filas, limite, soloAbiertas)) };
 }
 
 // --- Herramientas BOE -----------------------------------------------------------------------
@@ -417,7 +362,7 @@ server.registerTool(
   async ({ id, max_caracteres }) => texto(await textoDocumento(id, max_caracteres ?? 8000)),
 );
 
-// --- Herramientas de ayudas (base local de la BDNS) -----------------------------------------
+// --- Herramientas de ayudas (BDNS en directo) -----------------------------------------------
 
 server.registerTool(
   "ayudas_buscar",
@@ -443,7 +388,7 @@ server.registerTool(
     },
   },
   async (a) => {
-    exigirBase();
+    calentarCalendario();
     const soloAbiertas = a.solo_abiertas ?? true;
     const f: Filtros = {
       ...a,
@@ -451,59 +396,53 @@ server.registerTool(
       // Buscar "abiertas" implica no mostrar las concesiones directas que el título delata.
       excluir_directas: a.excluir_directas ?? soloAbiertas,
     };
-    const r = await buscarAyudas(f, a.limite ?? 10, soloAbiertas);
+    const r = await buscarDirecto(f, a.limite ?? 10, soloAbiertas);
 
     // Con el periodo por defecto (90 días), avisar de lo que queda fuera: una ayuda registrada
-    // hace cuatro meses puede seguir abierta si su plazo es largo.
-    // De esas anteriores, las que tienen un plazo conocido que aún no ha vencido se muestran aparte.
-    const fAnteriores: Filtros = { ...f, desde: undefined, hasta: a.hasta && a.hasta < hace(91) ? a.hasta : hace(91) };
-    const anteriores = a.desde ? 0 : totalConFiltros(fAnteriores);
-    const vigentes =
-      !a.desde && anteriores && soloAbiertas
-        ? await buscarAyudas({ ...fAnteriores, solo_plazo_vigente: true }, 5, true)
-        : undefined;
-    const bloqueVigentes = vigentes?.visibles.length
-      ? `\n\n## Registradas hace más de 90 días y todavía abiertas (${vigentes.visibles.length} de ${vigentes.total} con plazo conocido sin vencer)\n\n` +
-        vigentes.visibles.map((x) => formatearFila(x, vigentes.detalles.get(x.codigo))).join("\n\n")
-      : "";
+    // hace meses puede seguir abierta si su plazo es largo. Se cuentan sin descartar las
+    // concesiones directas (un total de la API, una sola petición); si hace falta descargar
+    // demasiadas filas (búsquedas por palabras muy comunes), el aviso se omite.
+    const anteriores = a.desde
+      ? 0
+      : await totalDirecto({
+          ...f,
+          desde: undefined,
+          hasta: a.hasta && a.hasta < hace(91) ? a.hasta : hace(91),
+          excluir_directas: false,
+        }).catch(() => 0);
     const avisoPeriodo = a.desde
       ? ""
-      : `\n\n📅 La búsqueda principal mira las registradas en los últimos 90 días (desde ${f.desde}).` +
+      : `\n\n📅 La búsqueda mira las registradas en los últimos 90 días (desde ${f.desde}).` +
         (anteriores
-          ? ` Con estos mismos filtros hay ${anteriores} registradas antes` +
-            (vigentes?.total
-              ? `: ${vigentes.total} con plazo conocido aún abierto (arriba); del resto no siempre se conoce el plazo.`
-              : "; algunas pueden seguir abiertas si su plazo es largo.") +
-            " Usa 'desde' para incluirlas todas."
+          ? ` Con estos filtros hay ${anteriores} registradas antes (incluidas concesiones directas); ` +
+            "algunas pueden seguir abiertas si su plazo es largo. Usa 'desde' para incluirlas."
           : "");
 
-    if (r.total === 0 && !bloqueVigentes) {
+    if (r.total === 0) {
       return texto(
-        "Ninguna convocatoria de la base coincide con estos filtros. Ojo: la búsqueda es por " +
-          "palabras del título y por la clasificación oficial de la BDNS; esto NO prueba que no " +
-          "existan ayudas. Prueba sinónimos o prefijos ('digital*'), quita algún filtro o amplía " +
-          `las fechas.${avisoPeriodo}\n\n${notaCobertura(f)}`,
+        "Ninguna convocatoria coincide con estos filtros. Ojo: la búsqueda es por palabras del " +
+          "título y por la clasificación oficial de la BDNS; esto NO prueba que no existan ayudas. " +
+          "Prueba sinónimos o prefijos ('digital*'), quita algún filtro o amplía las fechas." +
+          `${avisoPeriodo}\n\n${FUENTE}`,
       );
     }
     const cabecera =
-      `${r.total} convocatorias coinciden (TOTAL EXACTO en la base; de las que ya tienen el plazo ` +
-      `analizado, ${r.cerradas} están cerradas y ${r.sin_plazo} no admiten solicitud). La lista ` +
-      `siguiente es solo una MUESTRA de las más recientes${soloAbiertas ? " en las que aún se puede solicitar" : ""}: ` +
-      `no cuentes sobre ella, usa ayudas_recuento.`;
+      `${r.total} convocatorias coinciden (TOTAL EXACTO en la BDNS` +
+      `${f.excluir_directas ? ", sin las concesiones directas que delata el título" : ""}). ` +
+      `De las ${r.revisadas} revisadas, ${r.cerradas} están cerradas y ${r.sin_plazo} no admiten solicitud. ` +
+      `La lista siguiente es solo una MUESTRA de las más recientes${soloAbiertas ? " en las que aún se puede solicitar" : ""}: ` +
+      "no cuentes sobre ella, usa ayudas_recuento.";
     const principal =
-      r.total === 0
-        ? "Ninguna convocatoria registrada en los últimos 90 días coincide con estos filtros."
-        : r.visibles.length === 0
-          ? `${r.total} convocatorias coinciden con los filtros, pero las más recientes que se han ` +
-            "revisado ya están cerradas o no admiten solicitud. Prueba con solo_abiertas=false para " +
-            "verlas, o amplía las fechas."
-          : `${cabecera}\n\n${r.visibles.map((x) => formatearFila(x, r.detalles.get(x.codigo))).join("\n\n")}`;
-    const avisoFallo =
-      r.fallo || vigentes?.fallo
-        ? "\n\n⚠️ La BDNS está limitando peticiones: algunas convocatorias se muestran sin plazo ni presupuesto."
-        : "";
+      r.visibles.length === 0
+        ? `${r.total} convocatorias coinciden con los filtros, pero las más recientes que se han ` +
+          "revisado ya están cerradas o no admiten solicitud. Prueba con solo_abiertas=false para " +
+          "verlas, o amplía las fechas."
+        : `${cabecera}\n\n${r.visibles.map((x) => formatearFila(x, r.detalles.get(x.codigo))).join("\n\n")}`;
+    const avisoFallo = r.fallo
+      ? "\n\n⚠️ La BDNS está limitando peticiones: algunas convocatorias se muestran sin plazo ni presupuesto."
+      : "";
     return texto(
-      `${principal}${bloqueVigentes}${avisoFallo}${avisoPeriodo}\n\n${notaCobertura(f)}\n` +
+      `${principal}${avisoFallo}${avisoPeriodo}\n\n${FUENTE}\n` +
         "Usa ayuda_detalle con el código para ver requisitos y documentos.",
     );
   },
@@ -518,7 +457,9 @@ server.registerTool(
       "finalidad, beneficiario, instrumento, administración, órgano convocante, mes o año. " +
       "Ejemplos: '¿qué comunidad convoca más ayudas de vivienda este año?' → agrupar_por " +
       "'comunidad', finalidad 'vivienda', desde '2026-01-01'; '¿cuántas ayudas para pymes ha " +
-      "habido cada mes?' → agrupar_por 'mes', beneficiario 'autonomo-o-pyme'.",
+      "habido cada mes?' → agrupar_por 'mes', beneficiario 'autonomo-o-pyme'. Agrupar por " +
+      "comunidad o finalidad hace una consulta a la BDNS por grupo: unos 20 s la primera vez, " +
+      "inmediato al repetirla.",
     annotations: SOLO_LECTURA,
     inputSchema: {
       ...filtrosAyudas,
@@ -527,31 +468,33 @@ server.registerTool(
     },
   },
   async ({ agrupar_por, limite, ...a }) => {
-    exigirBase();
+    calentarCalendario();
     const f: Filtros = a;
-    const grupos = recuento(f, agrupar_por, limite ?? 20);
-    const total = totalConFiltros(f);
-    if (total === 0) {
-      return texto(`Ninguna convocatoria coincide con estos filtros.\n\n${notaCobertura(f)}`);
-    }
-    // El presupuesto solo se suma si hay dato de casi todas: una suma parcial se cita como total.
-    const presupuesto = (g: (typeof grupos)[number]) =>
-      g.con_presupuesto / g.convocatorias >= 0.8
-        ? euros(g.presupuesto_conocido)
-        : `— (solo ${g.con_presupuesto} de ${g.convocatorias} con dato)`;
-    const filas = grupos.map(
-      (g) => `| ${g.grupo} | ${g.convocatorias} | ${g.titulos_distintos} | ${presupuesto(g)} |`,
+    const { total, grupos } = await recuentoDirecto(f, agrupar_por, limite ?? 20);
+    if (total === 0) return texto(`Ninguna convocatoria coincide con estos filtros.\n\n${FUENTE}`);
+    // Los títulos distintos solo se conocen cuando se han descargado las filas.
+    const conTitulos = grupos.some((g) => g.titulos_distintos !== null);
+    const filas = grupos.map((g) =>
+      conTitulos ? `| ${g.grupo} | ${g.convocatorias} | ${g.titulos_distintos ?? "—"} |` : `| ${g.grupo} | ${g.convocatorias} |`,
     );
     const notas = [
       `Total de convocatorias con estos filtros: ${total} (cifra exacta).`,
-      "'Títulos distintos' cuenta una vez las convocatorias con el mismo título y órgano: un " +
-        "ayuntamiento puede registrar decenas de ayudas individuales bajo un mismo plan.",
-      "El presupuesto solo se muestra cuando hay dato de al menos el 80 % de las convocatorias; " +
-        "con menos, sumarlo daría una cifra engañosa.",
+      conTitulos
+        ? "'Títulos distintos' cuenta una vez las convocatorias con el mismo título y órgano: un " +
+          "ayuntamiento puede registrar decenas de ayudas individuales bajo un mismo plan."
+        : "",
+      !f.desde
+        ? agrupar_por === "mes"
+          ? "Sin 'desde': se muestran los últimos 12 meses."
+          : agrupar_por === "anio"
+            ? "Sin 'desde': se muestran los últimos 5 años."
+            : "Sin 'desde': cuenta todo el histórico de la BDNS."
+        : "",
+      "La BDNS no da el presupuesto de las convocatorias en bloque, así que no se suma: el de una " +
+        "convocatoria concreta está en ayuda_detalle.",
       f.excluir_directas
-        ? "Se han excluido las concesiones directas y nominativas: las confirmadas por su tipo y, " +
-          "mientras no se conozca el tipo, las que el título delata (estimación: precisión ~97 %, " +
-          "detecta ~67 %). Quedarán algunas sin detectar."
+        ? "Se han excluido las concesiones directas y nominativas que el título delata (estimación: " +
+          "precisión ~97 %, detecta ~67 %). Quedarán algunas sin detectar."
         : "Ojo: la BDNS registra también como 'convocatoria' cada concesión directa a un " +
           "beneficiario concreto (instrumentales, que no admiten solicitudes), y el listado no las " +
           "distingue: estas cifras miden actividad de subvenciones, no oportunidades abiertas. " +
@@ -564,12 +507,12 @@ server.registerTool(
     }
     return texto(
       [
-        `| ${agrupar_por} | convocatorias | títulos distintos | presupuesto conocido |`,
-        "|---|---|---|---|",
+        conTitulos ? `| ${agrupar_por} | convocatorias | títulos distintos |` : `| ${agrupar_por} | convocatorias |`,
+        conTitulos ? "|---|---|---|" : "|---|---|",
         ...filas,
         "",
-        ...notas,
-        notaCobertura(f),
+        ...notas.filter(Boolean),
+        FUENTE,
       ].join("\n"),
     );
   },
@@ -589,22 +532,9 @@ server.registerTool(
     },
   },
   async ({ codigo, max_caracteres_extracto }) => {
+    calentarCalendario();
     const cod = codigo.trim();
-    let a: DetalleCompleto;
-    let nota = "";
-    const guardado = leerDetalle(cod);
-    const reciente = guardado && Date.now() - new Date(guardado.en).getTime() < 86_400_000;
-    if (guardado && reciente) {
-      a = guardado.detalle;
-    } else {
-      try {
-        a = await obtenerDetalle(cod);
-      } catch (e) {
-        if (!(e instanceof BdnsNoDisponible) || !guardado) throw e;
-        a = guardado.detalle;
-        nota = `\n\n⚠️ BDNS no disponible: datos guardados el ${guardado.en.slice(0, 10)}.`;
-      }
-    }
+    const a = await detalleDirecto(cod);
     const max = max_caracteres_extracto ?? 6000;
     const extracto =
       a.extracto.length > max ? a.extracto.slice(0, max) + "\n[... extracto truncado]" : a.extracto;
@@ -634,7 +564,7 @@ server.registerTool(
         a.documentos.length
           ? "Para leer el contenido (cuantía por beneficiario, requisitos, documentación) usa ayuda_texto con este código."
           : "",
-      ].filter((l) => l !== "").join("\n") + historial + nota,
+      ].filter((l) => l !== "").join("\n") + historial,
     );
   },
 );
@@ -801,8 +731,8 @@ server.registerTool(
     if (lista) partes.push(lista);
     partes.push(
       r.desdeCache
-        ? "(Texto guardado en la base local.)"
-        : "(Documento descargado ahora y guardado en la base local: la próxima consulta será inmediata.)",
+        ? "(Texto guardado en la caché local.)"
+        : "(Documento descargado ahora y guardado en la caché local: la próxima consulta será inmediata.)",
     );
     return texto(partes.join("\n\n"));
   },
@@ -841,22 +771,19 @@ server.registerTool(
     },
   },
   async ({ dias, incluir_retrasadas, incluir_baja_confianza, limite, ...f }) => {
-    const base = exigirBase();
     const hoy = todayIso(); // hora de España
-    const anio = Number(hoy.slice(0, 4));
-    // El calendario necesita 3 años completos de histórico. Con menos, "0 ayudas recurrentes"
-    // sería una respuesta falsa: mejor decir que aún no se puede.
-    const primerAnioCompleto = Number(base.desde?.slice(0, 4)) + (base.desde?.slice(5) === "01-01" ? 0 : 1);
-    if (!seriesListas() || !(primerAnioCompleto <= anio - 3)) {
+    // Sin el histórico, "0 ayudas recurrentes" sería una respuesta falsa: mejor decir que aún no se puede.
+    const cal = calendario();
+    if (!cal) {
+      prepararCalendario(log).catch((e) => log(`calendario: ${(e as Error).message}`));
       throw new Error(
-        "El histórico de la BDNS aún se está descargando (el calendario necesita 3 años completos; " +
-          `ahora hay desde ${base.desde ?? "?"}). Suele tardar unos 10 minutos la primera vez. ` +
+        `El calendario se está preparando: hay que descargar el histórico de la BDNS desde ${HISTORICO_DESDE} ` +
+          "(unos 2-3 minutos; luego se guarda una semana). Vuelve a intentarlo en un momento. " +
           "No interpretes esto como que no hay ayudas recurrentes.",
       );
     }
     const horizonte = sumarDias(hoy, dias ?? 60);
-    const w = where(f);
-    const todas = seriesFiltradas(w.sql, w.params).map((s) => prever(s, hoy));
+    const todas = (await seriesFiltradas(cal, f)).map((s) => prever(s, hoy));
     const previsiones = incluir_baja_confianza ? todas : todas.filter((p) => p.confianza !== "baja");
     const ocultas = todas.length - previsiones.length;
 
@@ -890,7 +817,7 @@ server.registerTool(
         retrasadas.slice(0, n).map(formatearPrevision).join("\n\n"),
       );
     }
-    const ev = evaluacionGuardada();
+    const ev = cal.evaluacion;
     partes.push(
       "Previsión basada en la fecha de REGISTRO en la BDNS de años anteriores; el plazo de solicitud " +
         "suele abrirse poco después, al publicarse el extracto. Una ayuda puede cambiar de fechas, " +
@@ -928,7 +855,7 @@ server.registerTool(
     },
   },
   async ({ comunidad, beneficiario, finalidad, palabras, dias }) => {
-    exigirBase();
+    calentarCalendario();
     const n = dias ?? 7;
     const desde = hace(n);
     const temas = palabras?.length ? palabras : [undefined];
@@ -938,7 +865,7 @@ server.registerTool(
     const bloques: string[] = [];
     let fallo = false;
     for (const t of temas) {
-      const r = await buscarAyudas({ texto: t, comunidad, beneficiario, finalidad, desde, excluir_directas: true }, 8, true);
+      const r = await buscarDirecto({ texto: t, comunidad, beneficiario, finalidad, desde, excluir_directas: true }, 8, true);
       fallo ||= r.fallo;
       for (const x of r.visibles) {
         if (vistas.has(x.codigo)) continue;
@@ -970,7 +897,7 @@ server.registerTool(
         formatearBoe(boe.slice(0, 20), boe.length),
       );
     }
-    partes.push(notaCobertura({ desde }));
+    partes.push(FUENTE);
     return texto(partes.join("\n\n"));
   },
 );
@@ -980,22 +907,29 @@ server.registerTool(
   {
     title: "Estado de los datos",
     description:
-      "Qué cubre la base local de ayudas: periodo, número de convocatorias, cuántas tienen " +
-      "detalle y cuándo se sincronizó por última vez.",
+      "De dónde salen los datos: consulta en directo a la BDNS y al BOE, estado de la caché " +
+      "temporal y del calendario previsto.",
     annotations: SOLO_LECTURA,
     inputSchema: {},
   },
   async () => {
-    const e = estadoBase();
+    const c = calendario();
+    const e = estadisticas();
     return texto(
-      e.ultima_sync
-        ? [
-            `- Convocatorias: ${e.convocatorias} (registradas del ${e.desde} al ${e.hasta})`,
-            `- Con detalle (plazo, presupuesto): ${e.con_detalle} (${Math.round((100 * e.con_detalle) / Math.max(1, e.convocatorias))} %); el resto se pide al consultarlas`,
-            `- Última sincronización: ${e.ultima_sync}`,
-            "- Fuentes: BDNS (infosubvenciones.es) y API de datos abiertos del BOE",
-          ].join("\n")
-        : "La base local aún no se ha creado; se está sincronizando por primera vez.",
+      [
+        "- Fuentes: BDNS (infosubvenciones.es) y API de datos abiertos del BOE, consultadas en " +
+          "directo: no hay copia local de la base de datos, así que los datos están siempre al día.",
+        `- Ritmo: como mucho una petición por segundo a la BDNS (BDNS_INTERVALO_MS = ${process.env.BDNS_INTERVALO_MS ?? 1000}).`,
+        e
+          ? `- Caché temporal: ${e.entradas} respuestas guardadas (${(e.bytes / 1e6).toFixed(1)} MB) en ${e.ruta}`
+          : "- Caché temporal: solo en memoria (no se puede escribir en disco).",
+        c
+          ? `- Calendario previsto: ${c.series.length} ayudas recurrentes, calculado el ${c.calculado.slice(0, 10)} ` +
+            `con el histórico desde ${HISTORICO_DESDE} (se recalcula cada semana).`
+          : calendarioEnCurso()
+            ? "- Calendario previsto: preparándose (descargando el histórico)."
+            : "- Calendario previsto: se preparará la primera vez que se use una herramienta de ayudas.",
+      ].join("\n"),
     );
   },
 );
@@ -1060,13 +994,5 @@ server.registerPrompt(
 
 await server.connect(new StdioServerTransport());
 
-// Mantener la base al día mientras el servidor está abierto, sin bloquear las preguntas.
-async function mantenimiento() {
-  try {
-    await mantener({ log });
-  } catch (e) {
-    log(`mantenimiento: ${(e as Error).message}`);
-  }
-}
-void mantenimiento();
-setInterval(mantenimiento, 6 * 3_600_000).unref();
+// El calendario caduca cada semana: si el servidor sigue abierto, se renueva al volver a usarse.
+setInterval(() => (calendarioPedido = false), 6 * 3_600_000).unref();

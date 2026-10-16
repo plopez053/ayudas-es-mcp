@@ -1,0 +1,58 @@
+{
+  "name": "ayudas-es-mcp",
+  "version": "0.7.0",
+  "mcpName": "io.github.plopez053/ayudas-es",
+  "description": "Servidor MCP de ayudas y subvenciones de España (BDNS) y del BOE, consultados en directo: recuentos exactos, plazos calculados y calendario previsto de convocatorias recurrentes",
+  "type": "module",
+  "bin": {
+    "ayudas-es-mcp": "dist/cli.js"
+  },
+  "files": [
+    "dist/**/*.js",
+    "!dist/**/*.test.js",
+    "!dist/smoke-test.js",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
+    "prepublishOnly": "npm run build",
+    "start": "node dist/cli.js",
+    "dev": "tsx src/cli.ts",
+    "test": "tsx src/plazos.test.ts && tsx src/documentos.test.ts && tsx src/fechas.test.ts && tsx src/cache.test.ts",
+    "test:live": "tsx src/directo.test.ts && tsx src/smoke-test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "subvenciones",
+    "ayudas",
+    "bdns",
+    "boe",
+    "españa",
+    "open-data"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "license": "MIT",
+  "author": "plopez053",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/plopez053/ayudas-es-mcp.git"
+  },
+  "homepage": "https://github.com/plopez053/ayudas-es-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/plopez053/ayudas-es-mcp/issues"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "unpdf": "^1.8.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

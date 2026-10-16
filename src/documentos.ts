@@ -1,19 +1,16 @@
 // Lectura de los documentos PDF de una convocatoria: bases, convocatoria, anexos.
 //
-// Solo se hace BAJO DEMANDA (herramienta ayuda_texto), nunca durante la sincronización, y el
-// texto extraído se guarda en la base: cada documento se descarga y procesa una sola vez.
+// Solo se hace BAJO DEMANDA (herramienta ayuda_texto) y el texto extraído se guarda en la
+// caché: cada documento se descarga y procesa una sola vez.
 //
 // No usa ningún LLM: localiza los apartados (cuantía, plazo, beneficiarios…) por sus títulos y
 // devuelve el texto LITERAL con su número de página, para que se pueda comprobar en el original.
 
-import { gunzipSync, gzipSync } from "node:zlib";
-import { abrir } from "./db.js";
+import { DIA, guardar, leer } from "./cache.js";
 import { norm } from "./texto.js";
 
 export const MAX_BYTES = 25 * 1024 * 1024;
 export const MAX_PAGINAS = 200;
-/** Documentos cuyo texto se conserva en la base (los más recientes). */
-const MAX_EN_CACHE = 400;
 
 // --- Elección del documento -----------------------------------------------------------------
 
@@ -123,41 +120,15 @@ export async function extraerPdf(datos: Uint8Array, id: string): Promise<TextoDo
   };
 }
 
-// --- Caché en la base ------------------------------------------------------------------------
+// --- Caché ----------------------------------------------------------------------------------
 
-function asegurarTabla() {
-  abrir().exec(`
-    CREATE TABLE IF NOT EXISTS documentos_texto (
-      id           TEXT PRIMARY KEY,
-      texto_gz     BLOB NOT NULL,   -- JSON {paginas, total_paginas, truncado, escaneado, bytes}, gzip
-      extraido_en  TEXT NOT NULL
-    ) WITHOUT ROWID;
-  `);
-}
+/** Un documento publicado no cambia: su texto se guarda un mes. */
+const VIGENCIA_TEXTO = 30 * DIA;
 
-export function leerTextoGuardado(id: string): TextoDocumento | undefined {
-  asegurarTabla();
-  const r = abrir().prepare("SELECT texto_gz FROM documentos_texto WHERE id = ?").get(id) as
-    | { texto_gz: Uint8Array }
-    | undefined;
-  if (!r) return undefined;
-  return { id, ...JSON.parse(gunzipSync(r.texto_gz).toString("utf8")) };
-}
+export const leerTextoGuardado = (id: string) => leer<TextoDocumento>(`pdf:${id}`);
 
 export function guardarTexto(t: TextoDocumento) {
-  asegurarTabla();
-  const { id, ...resto } = t;
-  const d = abrir();
-  d.prepare("INSERT OR REPLACE INTO documentos_texto VALUES (?, ?, ?)").run(
-    id,
-    gzipSync(Buffer.from(JSON.stringify(resto), "utf8")),
-    new Date().toISOString(),
-  );
-  // Conservar solo los más recientes: el texto de miles de convocatorias haría crecer la base.
-  d.prepare(
-    `DELETE FROM documentos_texto WHERE id IN (
-       SELECT id FROM documentos_texto ORDER BY extraido_en DESC LIMIT -1 OFFSET ?)`,
-  ).run(MAX_EN_CACHE);
+  guardar(`pdf:${t.id}`, t, VIGENCIA_TEXTO);
 }
 
 // --- Localización de apartados --------------------------------------------------------------

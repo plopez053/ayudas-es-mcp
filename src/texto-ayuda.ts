@@ -1,8 +1,7 @@
 // Texto de los documentos de una convocatoria, bajo demanda y con caché.
 
 import { BdnsNoDisponible, descargarDocumento } from "./bdns.js";
-import { leerDetalle } from "./db.js";
-import { obtenerDetalle, type DetalleCompleto } from "./detalle.js";
+import { detalleDirecto, type DetalleCompleto } from "./directo.js";
 import {
   extraerPdf,
   guardarTexto,
@@ -52,7 +51,7 @@ async function textoDe(id: string): Promise<{ texto: TextoDocumento; desdeCache:
  * sea el texto de la convocatoria o de las bases (no un anexo ni un formulario).
  */
 export async function textoDeAyuda(codigo: string, documentoId?: string): Promise<TextoDeAyuda> {
-  const detalle = leerDetalle(codigo)?.detalle ?? (await obtenerDetalle(codigo));
+  const detalle = await detalleDirecto(codigo);
   const documentos: DocumentoConId[] = ordenarDocumentos(
     detalle.documentos
       .map((d) => ({ id: d.url.match(/idDocumento=(\d+)/)?.[1] ?? "", nombre: d.nombre, url: d.url }))

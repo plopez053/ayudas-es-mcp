@@ -34,7 +34,7 @@ export type Comunidad = keyof typeof COMUNIDADES;
 
 /** Etiqueta para las ayudas de ámbito estatal (región "ES - ESPAÑA"). */
 export const NACIONAL = "nacional";
-const ID_ESPANA = 1;
+export const ID_ESPANA = 1;
 
 export const BENEFICIARIOS = {
   "autonomo-o-pyme": 3,
@@ -92,7 +92,8 @@ export const urlFicha = (codigo: string) => `${WEB}/${codigo}`;
 
 /**
  * Limitador global: como mucho una petición cada INTERVALO_MS, venga de donde venga
- * (sincronización, relleno de detalles o una pregunta). La BDNS bloquea las ráfagas.
+ * (una pregunta, sus detalles o el histórico del calendario). La BDNS bloquea las ráfagas.
+ * Es por proceso: varias instancias del servidor no se coordinan entre sí.
  */
 const INTERVALO_MS = Number(process.env.BDNS_INTERVALO_MS ?? 1000);
 let siguienteHueco = 0;
@@ -105,7 +106,7 @@ async function turno() {
 
 const CABECERAS = {
   Accept: "application/json",
-  "User-Agent": `${NOMBRE}/${VERSION} (servidor MCP de datos abiertos; sincronizacion diaria con limite de ritmo)`,
+  "User-Agent": `${NOMBRE}/${VERSION} (servidor MCP de datos abiertos; consultas bajo demanda con limite de ritmo y cache)`,
 };
 
 export class BdnsNoDisponible extends Error {}
@@ -242,7 +243,42 @@ export interface FilaListado {
 }
 
 /** La API no devuelve más de 10.000 filas por página, pida lo que se pida. */
-const TAM_PAGINA = 10_000;
+export const TAM_PAGINA = 10_000;
+
+/**
+ * Una página del listado (las más recientes primero) y el total exacto de coincidencias, que la
+ * API da sin descargar el resto: con `pageSize` 1, contar cuesta una sola petición.
+ * Sin `desde` ni `hasta`, todo el histórico de la BDNS.
+ */
+export async function paginaListado(
+  filtros: Record<string, string>,
+  desde: string | undefined,
+  hasta: string | undefined,
+  page: number,
+  pageSize: number,
+): Promise<{ filas: FilaListado[]; total: number; ultima: boolean }> {
+  const q = new URLSearchParams({
+    ...filtros,
+    page: String(page),
+    pageSize: String(Math.min(pageSize, TAM_PAGINA)),
+    order: "numeroConvocatoria",
+    direccion: "desc",
+  });
+  if (desde) q.set("fechaDesde", isoADma(desde));
+  if (hasta) q.set("fechaHasta", isoADma(hasta));
+  const json = await getJson(`${API}/convocatorias/busqueda?${q}`);
+  const filas: FilaListado[] = (json.content ?? []).map((c: any) => ({
+    codigo: String(c.numeroConvocatoria),
+    titulo: c.descripcion ?? "",
+    titulo_cooficial: c.descripcionLeng ?? null,
+    administracion: c.nivel1 ?? "",
+    departamento: c.nivel2 ?? "",
+    organo: c.nivel3 ?? "",
+    fecha_registro: c.fechaRecepcion,
+    mrr: Boolean(c.mrr),
+  }));
+  return { filas, total: Number(json.totalElements ?? filas.length), ultima: json.last !== false };
+}
 
 /**
  * Todas las convocatorias registradas entre dos fechas que cumplen los filtros de la API
@@ -250,57 +286,17 @@ const TAM_PAGINA = 10_000;
  */
 export async function listar(
   filtros: Record<string, string>,
-  desde: string,
-  hasta: string,
+  desde: string | undefined,
+  hasta: string | undefined,
 ): Promise<FilaListado[]> {
   const filas: FilaListado[] = [];
   for (let page = 0; ; page++) {
-    const q = new URLSearchParams({
-      ...filtros,
-      page: String(page),
-      pageSize: String(TAM_PAGINA),
-      order: "numeroConvocatoria",
-      direccion: "desc",
-      fechaDesde: isoADma(desde),
-      fechaHasta: isoADma(hasta),
-    });
-    const json = await getJson(`${API}/convocatorias/busqueda?${q}`);
-    for (const c of json.content ?? []) {
-      filas.push({
-        codigo: String(c.numeroConvocatoria),
-        titulo: c.descripcion ?? "",
-        titulo_cooficial: c.descripcionLeng ?? null,
-        administracion: c.nivel1 ?? "",
-        departamento: c.nivel2 ?? "",
-        organo: c.nivel3 ?? "",
-        fecha_registro: c.fechaRecepcion,
-        mrr: Boolean(c.mrr),
-      });
-    }
-    if (json.last !== false) return filas;
+    const r = await paginaListado(filtros, desde, hasta, page, TAM_PAGINA);
+    filas.push(...r.filas);
+    if (r.ultima) return filas;
   }
 }
 
-/** Parámetros de la API para listar las convocatorias de cada etiqueta que se guarda. */
-export async function* consultasDeEtiquetas(): AsyncGenerator<{
-  tipo: string;
-  valor: string;
-  filtros: Record<string, string>;
-}> {
-  for (const [valor, id] of Object.entries(FINALIDADES)) {
-    yield { tipo: "finalidad", valor, filtros: { finalidad: String(id) } };
-  }
-  for (const [valor, id] of Object.entries(BENEFICIARIOS)) {
-    yield { tipo: "beneficiario", valor, filtros: { tiposBeneficiario: String(id) } };
-  }
-  for (const [valor, id] of Object.entries(INSTRUMENTOS)) {
-    yield { tipo: "instrumento", valor, filtros: { instrumentos: String(id) } };
-  }
-  yield { tipo: "comunidad", valor: NACIONAL, filtros: { regiones: String(ID_ESPANA) } };
-  for (const c of Object.keys(COMUNIDADES) as Comunidad[]) {
-    yield { tipo: "comunidad", valor: c, filtros: { regiones: (await idsRegion(c)).join(",") } };
-  }
-}
 
 // --- Detalle --------------------------------------------------------------------------------
 
