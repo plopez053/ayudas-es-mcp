@@ -7,7 +7,7 @@ import path from "node:path";
 // Un archivo temporal: la prueba no debe tocar la caché real del usuario.
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ayudas-cache-"));
 process.env.AYUDAS_CACHE = path.join(dir, "cache.sqlite");
-const { guardar, leer, recordar, vaciar, RUTA_CACHE } = await import("./cache.js");
+const { guardar, leer, recordar, vaciar, cerrar, RUTA_CACHE } = await import("./cache.js");
 assert.equal(RUTA_CACHE, process.env.AYUDAS_CACHE);
 
 // Guardar y leer; caducidad.
@@ -45,10 +45,13 @@ assert.equal(await recordar("e", 60_000, async () => "ok"), "ok");
 // Persistencia: el valor sigue en disco si se borra la memoria. La memoria se limpia reabriendo
 // el módulo en otro proceso, así que se comprueba con una consulta a la tabla directamente.
 const { DatabaseSync } = await import("node:sqlite");
-const fila = new DatabaseSync(RUTA_CACHE).prepare("SELECT valor FROM cache WHERE clave = 'a'").get() as { valor: string } | undefined;
+const db = new DatabaseSync(RUTA_CACHE);
+const fila = db.prepare("SELECT valor FROM cache WHERE clave = 'a'").get() as { valor: string } | undefined;
+db.close();
 assert.equal(fila && JSON.parse(fila.valor).x, 1, "el valor se guarda en disco");
 
 vaciar();
 assert.equal(leer("a"), undefined, "vaciar borra la memoria y el disco");
+cerrar();
 fs.rmSync(dir, { recursive: true, force: true });
 console.log("Caché: OK");

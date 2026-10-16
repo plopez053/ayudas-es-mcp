@@ -159,5 +159,11 @@ export function vaciar() {
   }
 }
 
+/** Cierra el archivo (para las pruebas: en Windows no se puede borrar mientras está abierto). */
+export function cerrar() {
+  disco?.close();
+  disco = undefined;
+}
+
 export const HORA = 3_600_000;
 export const DIA = 24 * HORA;
