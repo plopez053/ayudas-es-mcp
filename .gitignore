@@ -3,3 +3,5 @@ dist/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+contexto.txt
+notas-sesion.txt

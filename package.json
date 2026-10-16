@@ -1,6 +1,6 @@
 {
   "name": "ayudas-es-mcp",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "mcpName": "io.github.plopez053/ayudas-es",
   "description": "Servidor MCP de ayudas y subvenciones de España (BDNS) y del BOE, consultados en directo: recuentos exactos, plazos calculados y calendario previsto de convocatorias recurrentes",
   "type": "module",
@@ -18,7 +18,7 @@
     "prepublishOnly": "npm run build",
     "start": "node dist/cli.js",
     "dev": "tsx src/cli.ts",
-    "test": "tsx src/plazos.test.ts && tsx src/documentos.test.ts && tsx src/fechas.test.ts && tsx src/cache.test.ts",
+    "test": "tsx src/plazos.test.ts && tsx src/documentos.test.ts && tsx src/fechas.test.ts && tsx src/cache.test.ts && tsx src/series.test.ts",
     "test:live": "tsx src/directo.test.ts && tsx src/smoke-test.ts",
     "typecheck": "tsc --noEmit"
   },

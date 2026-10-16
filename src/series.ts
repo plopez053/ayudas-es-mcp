@@ -10,7 +10,8 @@
 //
 // Es una previsión estadística sobre el histórico de la BDNS, no un anuncio oficial.
 
-import { ADMINISTRACIONES, listar, type FilaListado } from "./bdns.js";
+import { ADMINISTRACIONES, paginaListado, TAM_PAGINA, type FilaListado } from "./bdns.js";
+import { conLimite } from "./boe.js";
 import { DIA, guardar, leer, recordar } from "./cache.js";
 import { codigosCon, type Filtros } from "./directo.js";
 import { hoy as hoyEspana } from "./fechas.js";
@@ -107,6 +108,25 @@ function estadistica(porAnio: Map<number, Fila>, desdeAnio: number, hastaAnio: n
   };
 }
 
+export type Confianza = "alta" | "media" | "baja";
+
+/**
+ * Confianza de una serie con sus años anteriores a `hastaAnio` (día del año de cada uno):
+ * alta con 4+ años y poca variación, media con variación moderada, baja con el resto. Baja un
+ * nivel si el año pasado se alejó mucho de su fecha típica (la mediana no lo ve: con 3 años,
+ * uno movido dos meses deja la variación en pocos días), y como mucho es media si dejó de
+ * convocarse algún año.
+ */
+export function confianzaDe(dias: Map<number, number>, tipico: number, dispersion: number, hastaAnio: number): Confianza {
+  const anios = [...dias.keys()].filter((a) => a < hastaAnio);
+  let nivel = anios.length >= 4 && dispersion <= 15 ? 2 : dispersion <= 30 ? 1 : 0;
+  const huecos = hastaAnio - Math.min(...anios) - anios.length;
+  if (huecos > 0) nivel = Math.min(nivel, 1);
+  const ultimo = dias.get(hastaAnio - 1);
+  if (ultimo !== undefined && distanciaCircular(ultimo, tipico) > Math.max(15, 2 * dispersion)) nivel = Math.max(0, nivel - 1);
+  return (["baja", "media", "alta"] as const)[nivel];
+}
+
 /**
  * Evaluación retrospectiva: prevé el año `objetivo` usando solo los anteriores y lo compara
  * con lo que realmente se registró ese año.
@@ -126,8 +146,8 @@ function evaluarPrevision(grupos: Map<string, Fila[]>, objetivo: number) {
     salieron++;
     const err = distanciaCircular(diaDelAnio(real.fecha_registro), e.tipico);
     errores.push(err);
-    const conf = e.anios >= 4 && e.dispersion <= 15 ? "alta" : e.dispersion <= 30 ? "media" : "baja";
-    porConfianza[conf].push(err);
+    const dias = new Map([...porAnio].map(([a, f]) => [a, diaDelAnio(f.fecha_registro)]));
+    porConfianza[confianzaDe(dias, e.tipico, e.dispersion, objetivo)].push(err);
   }
   const pct = (xs: number[], dias: number) =>
     xs.length ? Math.round((100 * xs.filter((x) => x <= dias).length) / xs.length) : 0;
@@ -221,26 +241,46 @@ const CLAVE_EN_CURSO = "calendario:en_curso";
 /** Una semana: las series cambian poco, y así el histórico se descarga como mucho una vez por semana. */
 const VIGENCIA = 7 * DIA;
 
+/**
+ * Peticiones del histórico en vuelo a la vez. El limitador de bdns.ts sigue lanzando como mucho
+ * una por segundo, pero una página de 10.000 filas tarda varios segundos en llegar: de una en
+ * una, el histórico tardaba unos 3 minutos. Con 4 a la vez la BDNS se ralentizaba hasta agotar
+ * el tiempo máximo, y las preguntas que llegaban mientras tanto lo notaban.
+ */
+const EN_VUELO = 3;
+
 /** Histórico desde HISTORICO_DESDE, año a año (cada año son unas 7 páginas de 10.000). */
 async function descargarHistorico(log: (m: string) => void): Promise<Fila[]> {
   const hoy = hoyEspana();
+  const anioActual = Number(hoy.slice(0, 4));
+  const anios: [string, string][] = [];
+  for (let a = PRIMER_ANIO; a <= anioActual; a++) anios.push([`${a}-01-01`, a === anioActual ? hoy : `${a}-12-31`]);
+
+  // La primera página de cada año dice cuántas tiene; después, el resto de páginas.
+  const primeras = await conLimite(anios, EN_VUELO, ([d, h]) => paginaListado({}, d, h, 0, TAM_PAGINA));
+  log(`calendario: primeras páginas descargadas (${primeras.reduce((n, p) => n + p.total, 0)} convocatorias en total)`);
+  const resto = anios.flatMap(([d, h], i) =>
+    Array.from({ length: Math.ceil(primeras[i].total / TAM_PAGINA) - 1 }, (_, k) => [d, h, k + 1] as const),
+  );
+  const paginas = await conLimite(resto, EN_VUELO, ([d, h, p]) => paginaListado({}, d, h, p, TAM_PAGINA));
+
+  // Solo los campos que hacen falta: el histórico completo son unas 380.000 filas. Sin
+  // duplicados: si se registra una convocatoria durante la descarga, las páginas se desplazan.
+  const vistas = new Set<string>();
   const filas: Fila[] = [];
-  for (let anio = PRIMER_ANIO; anio <= Number(hoy.slice(0, 4)); anio++) {
-    const desde = `${anio}-01-01`;
-    const hasta = anio === Number(hoy.slice(0, 4)) ? hoy : `${anio}-12-31`;
-    // Solo los campos que hacen falta: el histórico completo son unas 380.000 filas.
-    for (const f of await listar({}, desde, hasta)) {
-      filas.push({
-        codigo: f.codigo,
-        titulo: f.titulo,
-        organo: f.organo,
-        departamento: f.departamento,
-        administracion: f.administracion,
-        fecha_registro: f.fecha_registro,
-      });
-    }
-    log(`calendario: histórico de ${anio} descargado (${filas.length} convocatorias)`);
+  for (const f of [...primeras, ...paginas].flatMap((p) => p.filas)) {
+    if (vistas.has(f.codigo)) continue;
+    vistas.add(f.codigo);
+    filas.push({
+      codigo: f.codigo,
+      titulo: f.titulo,
+      organo: f.organo,
+      departamento: f.departamento,
+      administracion: f.administracion,
+      fecha_registro: f.fecha_registro,
+    });
   }
+  log(`calendario: histórico descargado (${filas.length} convocatorias, ${primeras.length + paginas.length} páginas)`);
   return filas;
 }
 
@@ -328,7 +368,7 @@ export interface Prevision extends SerieFila {
   fecha_prevista: string; // día típico en el año en curso
   desde: string; // ventana probable
   hasta: string;
-  confianza: "alta" | "media" | "baja";
+  confianza: Confianza;
 }
 
 const fechaDeDia = (anio: number, dia: number) =>
@@ -349,7 +389,7 @@ export function prever(s: SerieFila, hoy = hoyEspana()): Prevision {
         : hasta >= hoy
           ? "en_margen"
           : "retrasada";
-  const nAnios = Object.keys(s.anios).filter((a) => Number(a) < anio).length;
-  const confianza = nAnios >= 4 && s.dispersion <= 15 ? "alta" : s.dispersion <= 30 ? "media" : "baja";
+  const dias = new Map(Object.entries(s.anios).map(([a, x]) => [Number(a), diaDelAnio(x.fecha)]));
+  const confianza = confianzaDe(dias, s.dia_tipico, s.dispersion, anio);
   return { ...s, situacion, fecha_prevista, desde, hasta, confianza };
 }

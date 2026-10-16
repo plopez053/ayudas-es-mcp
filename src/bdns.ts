@@ -2,6 +2,7 @@
 // Recoge las convocatorias de ayudas de TODAS las administraciones: Estado, CCAA y entes locales.
 // Aviso legal de reutilización: https://www.infosubvenciones.es/bdnstrans/GE/es/avisolegal
 
+import { DIA, recordar } from "./cache.js";
 import { ErrorDeRed, esperar, pedir } from "./red.js";
 import { NOMBRE, VERSION } from "./version.js";
 
@@ -142,14 +143,35 @@ async function peticionBdns(
   }
 }
 
-/** Cuando bloquea, la BDNS devuelve una página HTML en lugar de JSON: se reintenta con espera. */
-async function getJson(url: string, intentos = 5): Promise<any> {
-  const res = await peticionBdns(url, "application/json", intentos, (r) =>
-    Boolean(r.headers.get("content-type")?.includes("json")),
-  );
-  if (res.status === 404 || res.status === 204) throw new Error(`No existe en la BDNS (${url})`);
-  return res.json();
+/**
+ * Cuando bloquea, la BDNS devuelve una página HTML en lugar de JSON: se reintenta con espera.
+ * El tiempo máximo cubre también la lectura del cuerpo: si se corta a medias (una página de
+ * 10.000 filas con el servidor lento), se reintenta igual, en lugar de dejar escapar el error
+ * de cancelación.
+ */
+async function getJson(url: string, intentos = 5, timeoutMs?: number): Promise<any> {
+  for (let i = 0; ; i++) {
+    const res = await peticionBdns(
+      url,
+      "application/json",
+      intentos,
+      (r) => Boolean(r.headers.get("content-type")?.includes("json")),
+      timeoutMs,
+    );
+    if (res.status === 404 || res.status === 204) throw new Error(`No existe en la BDNS (${url})`);
+    try {
+      return await res.json();
+    } catch (e) {
+      if (i + 1 >= intentos) {
+        throw new BdnsNoDisponible(`La respuesta de la BDNS se cortó (${(e as Error).message}). Reintenta en unos minutos.`);
+      }
+      await esperar(2000 * 2 ** i);
+    }
+  }
 }
+
+/** Una página de 10.000 filas puede tardar bastante más que una petición normal. */
+const TIMEOUT_PAGINA_GRANDE_MS = 90_000;
 
 const isoADma = (iso: string) => iso.split("-").reverse().join("/");
 
@@ -200,7 +222,8 @@ let arbolRegiones: Promise<any[]> | undefined;
  * no es jerárquico, así que se envían todos.
  */
 export async function idsRegion(comunidad: Comunidad): Promise<number[]> {
-  arbolRegiones ??= getJson(`${API}/regiones`).catch((e) => {
+  // El árbol de regiones apenas cambia: se guarda un mes y una sesión nueva no lo vuelve a pedir.
+  arbolRegiones ??= recordar("regiones", 30 * DIA, () => getJson(`${API}/regiones`)).catch((e) => {
     arbolRegiones = undefined;
     throw e;
   });
@@ -266,7 +289,7 @@ export async function paginaListado(
   });
   if (desde) q.set("fechaDesde", isoADma(desde));
   if (hasta) q.set("fechaHasta", isoADma(hasta));
-  const json = await getJson(`${API}/convocatorias/busqueda?${q}`);
+  const json = await getJson(`${API}/convocatorias/busqueda?${q}`, 5, pageSize > 1000 ? TIMEOUT_PAGINA_GRANDE_MS : undefined);
   const filas: FilaListado[] = (json.content ?? []).map((c: any) => ({
     codigo: String(c.numeroConvocatoria),
     titulo: c.descripcion ?? "",
